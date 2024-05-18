@@ -18,6 +18,8 @@ signatures = {
     'png': (b'\x89PNG\r\n\x1a\n', b'\x00\x00\x00\x00IEND\xaeB`\x82', '.png'),
     'gif': (b'GIF89a', b'\x00\x3b', '.gif'),
     'pdf': (b'%PDF-', b'%%EOF', '.pdf'),
+    'rar': (b'Rar!\x1A\x07\x00', None, '.rar'),  # RAR signature
+    'zip': (b'\x50\x4b\x03\x04', b'\x50\x4b\x05\x06', '.zip'),  # ZIP signature
 }
 
 # Başlangıç imzaları için regex
@@ -40,20 +42,43 @@ def open_drive(drive):
         logging.error(f"Disk açılamadı {drive}: {e}")
         raise
 
+# Add a global pause flag
+pause_thread = threading.Event()
+
+# Add a global stop flag
+stop_thread = False
+
+
+
 # Dosyaları kurtarma
-def recover_files(fileD, progress, log_text):
+def recover_files(fileD, log_text, recovered_files_label):
+    global stop_thread
     offs = 0
     drec = False
     kurtarID = 0
     byte = fileD.read(size)
-    total_size = os.path.getsize(fileD.name)
-    progress['maximum'] = total_size
+    rar_found = False  # Flag to indicate if a RAR file has been found
+    zip_found = False  # Flag to indicate if a ZIP file has been found
 
     while byte:
+        if stop_thread:
+            state.set("Stopped")  # Update the state
+            break
+        pause_thread.wait()  # This will block if the event is cleared
         match = start_regex.search(byte)
         if match:
             for filetype, (start, end, extension) in signatures.items():
                 if byte[match.start():match.start()+len(start)] == start:
+                    if filetype == 'rar':
+                        if rar_found:  # If a RAR file has already been found, skip this iteration
+                            continue
+                        else:
+                            rar_found = True  # Set the flag to True
+                    elif filetype == 'zip':
+                        if zip_found:  # If a ZIP file has already been found, skip this iteration
+                            continue
+                        else:
+                            zip_found = True  # Set the flag to True
                     drec = True
                     logging.info(f'{filetype.upper()} konumda bulundu: {str(hex(match.start()+(size*offs)))}')
                     log_text.delete(1.0, END)
@@ -78,13 +103,12 @@ def recover_files(fileD, progress, log_text):
                             fileN.close()
                             log_text.delete(1.0, END)
                             log_text.insert(END, read_logs())
+                            recovered_files_label.config(text=f"Recovered Files: {kurtarID}")
                         else: 
                             fileN.write(byte)
         byte = fileD.read(size)
         offs += 1
-        progress['value'] = offs * size
     fileD.close()
-
 # Log dosyasını okuma
 def read_logs():
     with open('recovery.log', 'r') as f:
@@ -92,38 +116,65 @@ def read_logs():
 
 # Ana fonksiyon
 def main():
+    
     def start_recovery():
+        
+        global stop_thread
+        stop_thread = False
+        pause_thread.set()  # Set the event to unblock the thread
+        state.set("Running")  # Update the state
         drive_letter = drive_letter_entry.get()
         try:
             drive = validate_drive(drive_letter)
             fileD = open_drive(drive)
             global recovery_thread
-            recovery_thread = threading.Thread(target=recover_files, args=(fileD, progress, log_text))
+            recovery_thread = threading.Thread(target=recover_files, args=(fileD, log_text, recovered_files_label))
             recovery_thread.daemon = True  # Make the thread a daemon thread
             recovery_thread.start()
         except Exception as e:
             messagebox.showerror("Error", str(e))
 
     def stop_recovery():
+        global stop_thread
         if recovery_thread.is_alive():
             messagebox.showinfo("Info", "Recovery process will be stopped soon.")
-            recovery_thread._stop()  # Stop the recovery thread
+            stop_thread = True
+            state.set("Stopping")  # Update the state
+
+    def pause_recovery():
+        pause_thread.clear()  # Clear the event to block the thread
+        state.set("Paused")  # Update the state
+
+    def resume_recovery():
+        global stop_thread
+        stop_thread = False  # Reset the stop_thread flag
+        pause_thread.set()  # Set the event to unblock the thread
+        state.set("Running")  # Update the state
 
     root = Tk()
     root.title("File Recovery")
+
+    global state
+    state = StringVar()
 
     Label(root, text="Drive Letter:").grid(row=0, column=0, padx=10, pady=10)
     drive_letter_entry = Entry(root)
     drive_letter_entry.grid(row=0, column=1, padx=10, pady=10)
 
-    progress = ttk.Progressbar(root, length=200, mode='determinate')
-    progress.grid(row=1, column=0, columnspan=2, padx=10, pady=10)
-
     log_text = Text(root)
-    log_text.grid(row=2, column=0, columnspan=2, padx=10, pady=10)
+    log_text.grid(row=1, column=0, columnspan=2, padx=10, pady=10)
 
-    Button(root, text="Start Recovery", command=start_recovery).grid(row=3, column=0, padx=10, pady=10)
-    Button(root, text="Stop Recovery", command=stop_recovery).grid(row=3, column=1, padx=10, pady=10)  # Add "Stop Recovery" button
+    recovered_files_label = Label(root, text="Recovered Files: 0")
+    recovered_files_label.grid(row=2, column=0, columnspan=2, padx=10, pady=10)
+
+    # Add a label to display the state
+    state_label = Label(root, textvariable=state)
+    state_label.grid(row=3, column=0, columnspan=2, padx=10, pady=10)
+
+    Button(root, text="Start Recovery", command=start_recovery).grid(row=4, column=0, padx=10, pady=10)
+    Button(root, text="Stop Recovery", command=stop_recovery).grid(row=4, column=1, padx=10, pady=10)
+    Button(root, text="Pause Recovery", command=pause_recovery).grid(row=5, column=0, padx=10, pady=10)
+    Button(root, text="Resume Recovery", command=resume_recovery).grid(row=5, column=1, padx=10, pady=10)
 
     root.mainloop()
 
